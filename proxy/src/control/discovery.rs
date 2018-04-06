@@ -105,7 +105,7 @@ enum RxError<T> {
     Stream(grpc::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum Update {
     Insert(SocketAddr),
     Remove(SocketAddr),
@@ -541,8 +541,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         };
         cache.update_union(
             addrs_to_add.map(|a| (a, ())),
-            &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                change));
+            &mut |change| Self::on_change(&mut self.txs, authority_for_logging, change));
         self.addrs = Exists::Yes(cache);
     }
 
@@ -553,8 +552,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
             Exists::Yes(mut cache) => {
                 cache.remove(
                     addrs_to_remove,
-                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |change| Self::on_change(&mut self.txs, authority_for_logging, change));
                 cache
             },
             Exists::Unknown | Exists::No => Cache::new(),
@@ -568,8 +566,7 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
         match self.addrs.take() {
             Exists::Yes(mut cache) => {
                 cache.clear(
-                    &mut |(addr, _), change| Self::on_change(&mut self.txs, authority_for_logging, addr,
-                                                        change));
+                    &mut |change| Self::on_change(&mut self.txs, authority_for_logging, change));
             },
             Exists::Unknown | Exists::No => (),
         };
@@ -582,21 +579,19 @@ impl <T: HttpService<ResponseBody = RecvBody>> DestinationSet<T> {
 
     fn on_change(txs: &mut Vec<mpsc::UnboundedSender<Update>>,
                  authority_for_logging: &DnsNameAndPort,
-                 addr: SocketAddr,
-                 change: CacheChange) {
-        let (update_str, update_constructor): (&'static str, fn(SocketAddr) -> Update) =
-            match change {
-                CacheChange::Insertion => ("insert", Update::Insert),
-                CacheChange::Removal => ("remove", Update::Remove),
-                CacheChange::Modification => {
-                    // TODO: generate `ChangeMetadata` events.
-                    return;
-                }
-            };
+                 change: CacheChange<SocketAddr, ()>) {
+        let (update_str, update, addr) = match change {
+            CacheChange::Insertion { key, value: _ } => ("insert", Update::Insert(key), key),
+            CacheChange::Removal { key } => ("remove", Update::Remove(key), key),
+            CacheChange::Modification { .. } => {
+                // TODO: generate `ChangeMetadata` events.
+                return;
+            }
+        };
         trace!("{} {:?} for {:?}", update_str, addr, authority_for_logging);
         // retain is used to drop any senders that are dead
         txs.retain(|tx| {
-            tx.unbounded_send(update_constructor(addr)).is_ok()
+            tx.unbounded_send(update).is_ok()
         });
     }
 }
